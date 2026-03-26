@@ -4,7 +4,7 @@ import "dotenv/config";
 
 // Keep this Prisma config file type-checkable even if Prisma's helper types
 // (e.g. `prisma/config`) aren't resolvable in the current TS setup.
-export default {
+const config = {
   schema: "prisma/schema.prisma",
   migrations: {
     path: "prisma/migrations",
@@ -12,4 +12,10 @@ export default {
   datasource: {
     url: process.env["DATABASE_URL"],
   },
-} as any;
+} satisfies {
+  schema: string;
+  migrations: { path: string };
+  datasource: { url: string | undefined };
+};
+
+export default config;

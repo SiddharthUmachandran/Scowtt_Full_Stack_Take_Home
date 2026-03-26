@@ -54,6 +54,11 @@ model User {
   sessions      Session[]
   // User has exactly one favorite movie (single row, enforced via unique Movie.userId)
   movie         Movie?
+
+  // Trivia fact caching + concurrency/rate-limit tracking.
+  movieFacts                MovieFact[]
+  movieFactGenerationLocks MovieFactGenerationLock[]
+  movieFactRequestLogs     MovieFactRequestLog[]
 }
 
 model VerificationToken {
@@ -71,4 +76,43 @@ model Movie {
   userId    String   @unique
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   createdAt DateTime @default(now())
+}
+
+// Generated movie trivia facts (cached for a short TTL).
+model MovieFact {
+  id         String   @id @default(cuid())
+  userId     String
+  movieTitle String
+  factText   String
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, movieTitle])
+}
+
+// Concurrency guard so only one OpenAI call runs at a time per user+movie.
+model MovieFactGenerationLock {
+  userId     String
+  movieTitle String
+
+  // If expiresAt is in the future, a generation is considered "in progress".
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, movieTitle])
+}
+
+// Simple DB-backed rate limiting for generation starts.
+model MovieFactRequestLog {
+  id         String   @id @default(cuid())
+  userId     String
+  movieTitle String
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
 }
