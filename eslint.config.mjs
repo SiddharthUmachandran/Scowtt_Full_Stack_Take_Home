@@ -12,6 +12,9 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Production-grade: Prisma generates JS artifacts that can fail strict lint rules.
+    // Generated code is not authored/maintained by the app; we ignore it in CI.
+    "src/generated/**",
   ]),
 ]);
 
