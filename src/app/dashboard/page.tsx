@@ -10,7 +10,6 @@ function initialsFromName(input?: string | null) {
   const value = (input ?? "").trim();
   if (!value) return "";
 
-  // Take first letter of up to 2 "words" (e.g., "John Doe" => "JD")
   const parts = value.split(/\s+/).filter(Boolean);
   const first = parts[0]?.[0] ?? "";
   const second = parts[1]?.[0] ?? "";
@@ -58,7 +57,7 @@ export default async function DashboardPage() {
         <section className="rounded-xl bg-white p-6 shadow-sm ring-1 ring-gray-200">
           <div className="flex items-center gap-4">
             {user?.image ? (
-              // External image: <img> keeps things simple (no Next/Image domain config needed).
+              // Keep plain img here to avoid remote image config for this scope.
               // eslint-disable-next-line @next/next/no-img-element
               <img
                 src={user.image}

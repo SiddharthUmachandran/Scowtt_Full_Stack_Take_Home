@@ -1,20 +1,12 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Get a free hosted Postgres database in seconds: `npx create-db`
-
 generator client {
   provider = "prisma-client-js"
   output   = "../src/generated/prisma"
 }
 
-// Prisma data source
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
-
-// Prisma models
 
 model Account {
   id                String  @id @default(cuid())
@@ -44,21 +36,17 @@ model Session {
 }
 
 model User {
-  id            String    @id @default(cuid())
-  name          String?
-  email         String?   @unique
-  emailVerified DateTime?
-  image         String?
-  hasCompletedOnboarding Boolean @default(false)
-  accounts      Account[]
-  sessions      Session[]
-  // User has exactly one favorite movie (single row, enforced via unique Movie.userId)
-  movie         Movie?
-
-  // Trivia fact caching + concurrency/rate-limit tracking.
-  movieFacts                MovieFact[]
-  movieFactGenerationLocks MovieFactGenerationLock[]
-  movieFactRequestLogs     MovieFactRequestLog[]
+  id                      String                     @id @default(cuid())
+  name                    String?
+  email                   String?                    @unique
+  emailVerified           DateTime?
+  image                   String?
+  hasCompletedOnboarding  Boolean                    @default(false)
+  accounts                Account[]
+  sessions                Session[]
+  movie                   Movie?
+  movieFacts              MovieFact[]
+  movieFactGenerationStates MovieFactGenerationState[]
 }
 
 model VerificationToken {
@@ -72,13 +60,11 @@ model VerificationToken {
 model Movie {
   id        String   @id @default(cuid())
   title     String
-  // Enforce one favorite movie per user
   userId    String   @unique
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   createdAt DateTime @default(now())
 }
 
-// Generated movie trivia facts (cached for a short TTL).
 model MovieFact {
   id         String   @id @default(cuid())
   userId     String
@@ -91,28 +77,13 @@ model MovieFact {
   @@index([userId, movieTitle])
 }
 
-// Concurrency guard so only one OpenAI call runs at a time per user+movie.
-model MovieFactGenerationLock {
+model MovieFactGenerationState {
   userId     String
   movieTitle String
-
-  // If expiresAt is in the future, a generation is considered "in progress".
   expiresAt  DateTime
   createdAt  DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, movieTitle])
-}
-
-// Simple DB-backed rate limiting for generation starts.
-model MovieFactRequestLog {
-  id         String   @id @default(cuid())
-  userId     String
-  movieTitle String
-  createdAt  DateTime @default(now())
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId, createdAt])
 }

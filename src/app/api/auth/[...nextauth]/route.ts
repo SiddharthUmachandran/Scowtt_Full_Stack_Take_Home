@@ -9,20 +9,19 @@ export const authOptions: NextAuthOptions = {
     GoogleProvider({
       clientId: process.env.GOOGLE_CLIENT_ID!,
       clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
-      // Elite: Profile mapping handles missing data gracefully
       profile(profile) {
         return {
           id: profile.sub,
           name: profile.name || profile.given_name || "New User",
           email: profile.email,
-          image: profile.picture || null, // Graceful fallback for missing photo
+          image: profile.picture || null, //  fallback for missing photo
         };
       },
     }),
   ],
   pages: {
     signIn: "/signin",
-    newUser: "/onboarding", // Redirects here ONLY on first-time account creation
+    newUser: "/onboarding", // Redirect here on first time account creation
   },
   callbacks: {
     async session({ session, user }) {

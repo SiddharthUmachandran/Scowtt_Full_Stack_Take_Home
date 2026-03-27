@@ -14,24 +14,13 @@ type MovieFactState = {
 } | null;
 
 const OPENAI_TIMEOUT_MS = 30_000;
-const GENERATION_LOCK_TTL_MS = 60_000;
+const GENERATION_STATE_TTL_MS = 60_000;
 
-// Rate limiting: generation start attempts per user.
-const RATE_LIMIT_WINDOW_MS = 60_000;
-const RATE_LIMIT_MAX_STARTS_PER_WINDOW = 5;
-
-// TODO: prune old MovieFactRequestLog rows periodically (or via a scheduled job)
-// to avoid unbounded table growth.
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-// Normalize the fact text to remove extra spaces and newlines
+// Normalize model output before returning it to the UI.
 function normalizeFactText(input: unknown) {
   if (typeof input !== "string") return null;
   const normalized = input.trim().replace(/\s+/g, " ");
   if (!normalized) return null;
-
-  // Basic safety rails for UI.
   if (normalized.length > 400) return normalized.slice(0, 400).trim();
   return normalized;
 }
@@ -48,8 +37,7 @@ async function fetchMovieFactFromOpenAI(movieTitle: string) {
   const timeout = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
 
   try {
-    // Using fetch keeps the implementation lightweight (no extra dependency)
-    // ensures API keys stay server-side.
+    // Keep OpenAI calls server-side so keys stay private.
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -65,7 +53,7 @@ async function fetchMovieFactFromOpenAI(movieTitle: string) {
           {
             role: "system",
             content:
-              "You generate short, accurate, non-marketing movie trivia facts. Return only the fact text (no quotes, no title, no extra words).",
+              "You generate short, accurate, movie trivia facts. Return only the fact text (no quotes, no title, no extra words).",
           },
           {
             role: "user",
@@ -79,7 +67,7 @@ async function fetchMovieFactFromOpenAI(movieTitle: string) {
     });
 
     if (!res.ok) {
-      // Keep server error details off the client; include only status.
+      // Send only safe error info to the client.
       throw new Error(`OpenAI request failed with status ${res.status}.`);
     }
 
@@ -111,7 +99,7 @@ async function getLatestFact(params: { userId: string; movieTitle: string }) {
   });
 }
 
-type LockWhere = {
+type GenerationStateWhere = {
   userId_movieTitle: {
     userId: string;
     movieTitle: string;
@@ -120,102 +108,86 @@ type LockWhere = {
 
 type Decision =
   | { mode: "cached"; factText: string }
-  | { mode: "rate_limited" }
   | { mode: "in_progress"; factText: string | null }
   | { mode: "generate" };
 
-async function releaseGenerationLock(lockWhere: LockWhere) {
-  await prisma.movieFactGenerationLock.delete({ where: lockWhere }).catch(() => {
-    /* lock might already be gone */
+function isUniqueConstraintError(err: unknown) {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "code" in err &&
+    (err as { code?: unknown }).code === "P2002"
+  );
+}
+
+async function clearGenerationInProgressFlag(generationStateWhere: GenerationStateWhere) {
+  await prisma.movieFactGenerationState.delete({ where: generationStateWhere }).catch(() => {
+    // Row can already be gone if another path cleared it.
   });
 }
 
-async function decideGenerationPath(params: {
+export async function decideGenerationPath(params: {
   actorUserId: string;
   movieTitle: string;
   now: Date;
-  lockWhere: LockWhere;
+  generationStateWhere: GenerationStateWhere;
 }) {
-  const { actorUserId, movieTitle, now, lockWhere } = params;
+  const { actorUserId, movieTitle, now, generationStateWhere } = params;
+  // Read latest fact first so we can return cached data quickly.
+  const factNow = await prisma.movieFact.findFirst({
+    where: { userId: actorUserId, movieTitle },
+    orderBy: { createdAt: "desc" },
+    select: { factText: true, createdAt: true },
+  });
 
-  return prisma.$transaction(async (tx) => {
-    const factNow = await tx.movieFact.findFirst({
-      where: { userId: actorUserId, movieTitle },
-      orderBy: { createdAt: "desc" },
-      select: { factText: true, createdAt: true },
-    });
+  if (factNow && isFactFresh({ createdAt: factNow.createdAt, now, cacheWindowMs: FACT_CACHE_WINDOW_MS })) {
+    return { mode: "cached", factText: factNow.factText } satisfies Decision;
+  }
 
-    if (factNow && isFactFresh({ createdAt: factNow.createdAt, now, cacheWindowMs: FACT_CACHE_WINDOW_MS })) {
-      return { mode: "cached", factText: factNow.factText } satisfies Decision;
-    }
+  const existingFlag = await prisma.movieFactGenerationState.findUnique({
+    where: generationStateWhere,
+    select: { expiresAt: true },
+  });
 
-    const existingLock = await tx.movieFactGenerationLock.findUnique({
-      where: lockWhere,
-      select: { expiresAt: true },
-    });
+  if (existingFlag && existingFlag.expiresAt.getTime() > now.getTime()) {
+    return { mode: "in_progress", factText: factNow?.factText ?? null } satisfies Decision;
+  }
 
-    if (existingLock && existingLock.expiresAt.getTime() > now.getTime()) {
-      return { mode: "in_progress", factText: factNow?.factText ?? null } satisfies Decision;
-    }
+  const nextExpiresAt = new Date(now.getTime() + GENERATION_STATE_TTL_MS);
 
-    const requestCount = await tx.movieFactRequestLog.count({
-      where: {
-        userId: actorUserId,
-        createdAt: { gte: new Date(now.getTime() - RATE_LIMIT_WINDOW_MS) },
-      },
-    });
-
-    if (requestCount >= RATE_LIMIT_MAX_STARTS_PER_WINDOW) {
-      return { mode: "rate_limited" } satisfies Decision;
-    }
-
-    await tx.movieFactRequestLog.create({
-      data: { userId: actorUserId, movieTitle },
-    });
-
-    await tx.movieFactGenerationLock.upsert({
-      where: lockWhere,
-      create: {
+  try {
+    // Try to claim the in-progress flag for this user and movie.
+    await prisma.movieFactGenerationState.create({
+      data: {
         userId: actorUserId,
         movieTitle,
-        expiresAt: new Date(now.getTime() + GENERATION_LOCK_TTL_MS),
-      },
-      update: {
-        expiresAt: new Date(now.getTime() + GENERATION_LOCK_TTL_MS),
+        expiresAt: nextExpiresAt,
       },
     });
-
     return { mode: "generate" } satisfies Decision;
-  });
-}
-
-async function resolveInProgressDecision(params: {
-  actorUserId: string;
-  movieTitle: string;
-  fallbackFactText: string | null;
-}) {
-  const { actorUserId, movieTitle, fallbackFactText } = params;
-
-  // Another tab is generating. Poll briefly for a newly cached fact.
-  for (let attempt = 0; attempt < 3; attempt++) {
-    await sleep(500);
-
-    const fact = await getLatestFact({ userId: actorUserId, movieTitle });
-    if (!fact) continue;
-
-    if (isFactFresh({ createdAt: fact.createdAt, now: new Date(), cacheWindowMs: FACT_CACHE_WINDOW_MS })) {
-      return { fact: fact.factText } satisfies MovieFactState;
+  } catch (err) {
+    // If the row already exists, we may still recover it if it is expired.
+    if (!isUniqueConstraintError(err)) {
+      throw err;
     }
-
-    // Fallback: return most recent cached fact even if slightly stale.
-    return { fact: fact.factText } satisfies MovieFactState;
   }
 
-  if (fallbackFactText) {
-    return { fact: fallbackFactText } satisfies MovieFactState;
+  const recoveredFlag = await prisma.movieFactGenerationState.updateMany({
+    where: {
+      userId: actorUserId,
+      movieTitle,
+      expiresAt: { lte: now },
+    },
+    data: {
+      expiresAt: nextExpiresAt,
+    },
+  });
+
+  if (recoveredFlag.count === 1) {
+    return { mode: "generate" } satisfies Decision;
   }
 
-  return { error: "Generating a movie fact right now. Please try again in a moment." } satisfies MovieFactState;
+  return { mode: "in_progress", factText: factNow?.factText ?? null } satisfies Decision;
 }
 
 export async function generateMovieFact(_prevState: MovieFactState, _formData: FormData) {
@@ -232,43 +204,38 @@ export async function generateMovieFact(_prevState: MovieFactState, _formData: F
     return { error: "Please add your favorite movie first on the onboarding page." } satisfies MovieFactState;
   }
 
-  // Make authorization explicit: we only ever use the signed-in userId for queries.
+  // Always scope reads and writes to the signed-in user.
   assertActorMatchesTarget({ actorUserId, targetUserId: actorUserId });
 
   const now = new Date();
   const latestFact = await getLatestFact({ userId: actorUserId, movieTitle });
 
-  // 1) 60-second cache window
+  // Fast path when cached fact is still fresh.
   if (latestFact && isFactFresh({ createdAt: latestFact.createdAt, now, cacheWindowMs: FACT_CACHE_WINDOW_MS })) {
     return { fact: latestFact.factText } satisfies MovieFactState;
   }
 
-  const lockWhere = { userId_movieTitle: { userId: actorUserId, movieTitle } } as const;
-  // 2) Burst/idempotency protection: generation lock + atomic rate limit.
+  const generationStateWhere = { userId_movieTitle: { userId: actorUserId, movieTitle } } as const;
+  // Use the DB flag to avoid duplicate concurrent generations.
   const decision = await decideGenerationPath({
     actorUserId,
     movieTitle,
     now,
-    lockWhere,
+    generationStateWhere,
   });
 
   if (decision.mode === "cached") {
     return { fact: decision.factText } satisfies MovieFactState;
   }
 
-  if (decision.mode === "rate_limited") {
-    return { error: "Too many requests. Please try again shortly." } satisfies MovieFactState;
-  }
-
   if (decision.mode === "in_progress") {
-    return resolveInProgressDecision({
-      actorUserId,
-      movieTitle,
-      fallbackFactText: decision.factText,
-    });
+    if (decision.factText) {
+      return { fact: decision.factText } satisfies MovieFactState;
+    }
+    return { error: "Generating a movie fact right now. Please try again in a moment." } satisfies MovieFactState;
   }
 
-  // decision.mode === "generate"
+  // Generate and save a new fact.
   try {
     const factText = await fetchMovieFactFromOpenAI(movieTitle);
     if (!factText) throw new Error("OpenAI returned an empty fact.");
@@ -280,15 +247,15 @@ export async function generateMovieFact(_prevState: MovieFactState, _formData: F
         factText,
       },
     });
-    await releaseGenerationLock(lockWhere);
+    await clearGenerationInProgressFlag(generationStateWhere);
 
     return { fact: factText } satisfies MovieFactState;
   } catch (err) {
     console.error("generateMovieFact openai error", { actorUserId, movieTitle, err });
 
-    await releaseGenerationLock(lockWhere);
+    await clearGenerationInProgressFlag(generationStateWhere);
 
-    // 3) Failure handling: OpenAI failed => return most recent cached fact if it exists.
+    // If OpenAI fails, fall back to the most recent cached fact.
     const mostRecent = await getLatestFact({ userId: actorUserId, movieTitle });
     if (mostRecent?.factText) {
       return { fact: mostRecent.factText } satisfies MovieFactState;

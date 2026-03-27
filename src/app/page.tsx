@@ -29,7 +29,7 @@ export default async function Home() {
             Get Started
           </Link>
           <a
-            href="https://github.com/your-username/your-repo"
+            href="https://github.com/SiddharthUmachandran/Scowtt_Full_Stack_Take_Home"
             target="_blank"
             className="flex h-12 items-center justify-center rounded-full border border-zinc-200 px-8 text-base font-medium transition-colors hover:bg-zinc-50"
           >
@@ -38,9 +38,7 @@ export default async function Home() {
         </div>
       </main>
       
-      <footer className="absolute bottom-8 text-sm text-zinc-400">
-        Built for the Scowtt Full-Stack Challenge
-      </footer>
+  
     </div>
   );
 }
